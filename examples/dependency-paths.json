@@ -1,0 +1,40 @@
+{
+  "repository": {
+    "app": [
+      {
+        "version": "1.0.0",
+        "dependencies": [
+          {"name": "web-framework", "specifier": ">=2.0"},
+          {"name": "auth-lib", "specifier": ""}
+        ]
+      }
+    ],
+    "web-framework": [
+      {"version": "3.2.0", "dependencies": [{"name": "shared-util", "specifier": ">=1.0,<3.0"}]},
+      {"version": "2.4.0", "dependencies": [{"name": "shared-util", "specifier": ">=1.0,<2.0"}]}
+    ],
+    "auth-lib": [
+      {"version": "0.9.0", "dependencies": [{"name": "shared-util", "specifier": "<2.0"}]}
+    ],
+    "shared-util": [
+      {"version": "2.0.0"},
+      {"version": "1.5.0"},
+      {"version": "1.4.0"}
+    ]
+  },
+  "root": "app",
+  "specifier": "",
+  "allow_prereleases": false,
+  "target_environment": {
+    "python_version": "3.11",
+    "sys_platform": "linux",
+    "platform_machine": "x86_64"
+  },
+  "current_lock": {
+    "app": "1.0.0",
+    "auth-lib": "0.9.0",
+    "shared-util": "1.5.0",
+    "web-framework": "3.2.0"
+  },
+  "target": "shared-util"
+}

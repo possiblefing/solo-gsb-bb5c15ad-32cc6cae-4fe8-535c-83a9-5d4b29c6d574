@@ -1,0 +1,46 @@
+{
+  "repository": {
+    "app": [
+      {
+        "version": "1.0.0",
+        "dependencies": [
+          {"name": "web-framework", "specifier": ">=2.0"},
+          {"name": "auth-lib", "specifier": ""}
+        ]
+      }
+    ],
+    "web-framework": [
+      {"version": "3.2.0", "dependencies": [{"name": "shared-util", "specifier": ">=1.0,<3.0"}, {"name": "telemetry-lib", "specifier": ""}]},
+      {"version": "2.4.0", "dependencies": [{"name": "shared-util", "specifier": ">=1.0,<2.0"}, {"name": "legacy-helper", "specifier": ""}]}
+    ],
+    "auth-lib": [
+      {"version": "1.1.0", "dependencies": [{"name": "shared-util", "specifier": ">=1.5"}, {"name": "json-tool", "specifier": "<2.0"}]},
+      {"version": "0.9.0", "dependencies": [{"name": "shared-util", "specifier": "<2.0"}]}
+    ],
+    "shared-util": [
+      {"version": "2.0.0"},
+      {"version": "1.5.0"},
+      {"version": "1.4.0"}
+    ],
+    "telemetry-lib": [
+      {"version": "1.0.0"}
+    ],
+    "legacy-helper": [
+      {"version": "0.5.0"}
+    ],
+    "json-tool": [
+      {"version": "2.0.0"},
+      {"version": "1.0.0"}
+    ]
+  },
+  "root": "app",
+  "specifier": "",
+  "allow_prereleases": false,
+  "target_environment": {
+    "python_version": "3.11",
+    "sys_platform": "linux",
+    "platform_machine": "x86_64"
+  },
+  "target_package": "web-framework",
+  "target_version": "2.4.0"
+}

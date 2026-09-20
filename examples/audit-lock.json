@@ -1,0 +1,55 @@
+{
+  "repository": {
+    "app": [
+      {
+        "version": "1.0.0",
+        "dependencies": [
+          {"name": "web-framework", "specifier": ">=2.0"},
+          {"name": "auth-lib", "specifier": ""},
+          {"name": "monitoring-lib", "specifier": ">=1.0"},
+          {"name": "cache-lib", "specifier": ">=2.0"},
+          {"name": "win-only", "specifier": "", "marker": "sys_platform == 'win32'"}
+        ]
+      }
+    ],
+    "web-framework": [
+      {"version": "3.2.0", "dependencies": [{"name": "shared-util", "specifier": ">=1.0,<3.0"}]},
+      {"version": "2.4.0", "dependencies": [{"name": "shared-util", "specifier": ">=1.0,<2.0"}]}
+    ],
+    "auth-lib": [
+      {"version": "0.9.0", "dependencies": [{"name": "shared-util", "specifier": "<2.0"}]}
+    ],
+    "shared-util": [
+      {"version": "2.0.0"},
+      {"version": "1.5.0"},
+      {"version": "1.4.0"}
+    ],
+    "cache-lib": [
+      {"version": "2.0.0"},
+      {"version": "1.5.0"}
+    ],
+    "monitoring-lib": [
+      {"version": "1.0.0"}
+    ],
+    "win-only": [
+      {"version": "1.0"}
+    ]
+  },
+  "root": "app",
+  "specifier": "",
+  "allow_prereleases": false,
+  "target_environment": {
+    "python_version": "3.11",
+    "sys_platform": "linux",
+    "platform_machine": "x86_64"
+  },
+  "current_lock": {
+    "app": "1.0.0",
+    "auth-lib": "0.9.0",
+    "cache-lib": "1.5.0",
+    "shared-util": "1.5.0",
+    "stale-pkg": "0.1.0",
+    "web-framework": "3.3.0",
+    "win-only": "1.0"
+  }
+}

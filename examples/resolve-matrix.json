@@ -1,0 +1,53 @@
+{
+  "repository": {
+    "app": [
+      {
+        "version": "2.0.0",
+        "dependencies": [
+          {"name": "linux-helper", "specifier": ">=1.0", "marker": "sys_platform == 'linux'"},
+          {"name": "win-helper", "specifier": ">=1.0", "marker": "sys_platform == 'win32'"},
+          {"name": "speedlib", "specifier": "", "marker": "platform_machine == 'x86_64'"},
+          {"name": "modern-core", "specifier": "", "marker": "python_version >= '3.10'"},
+          {"name": "legacy-core", "specifier": "", "marker": "python_version < '3.10'"}
+        ]
+      }
+    ],
+    "linux-helper": [
+      {"version": "1.2.0", "dependencies": [{"name": "native-bindings", "specifier": "==2"}]}
+    ],
+    "win-helper": [
+      {"version": "1.2.0", "dependencies": [{"name": "native-bindings", "specifier": "==1"}]}
+    ],
+    "native-bindings": [
+      {"version": "1"},
+      {"version": "2"},
+      {"version": "3"}
+    ],
+    "speedlib": [{"version": "1.0.0"}],
+    "modern-core": [{"version": "4.0.0"}],
+    "legacy-core": [{"version": "0.9.0"}]
+  },
+  "root": "app",
+  "specifier": "",
+  "allow_prereleases": false,
+  "target_environments": [
+    {
+      "id": "linux-x64-py311",
+      "python_version": "3.11",
+      "sys_platform": "linux",
+      "platform_machine": "x86_64"
+    },
+    {
+      "id": "win-amd64-py39",
+      "python_version": "3.9",
+      "sys_platform": "win32",
+      "platform_machine": "AMD64"
+    },
+    {
+      "id": "linux-arm64-py311",
+      "python_version": "3.11",
+      "sys_platform": "linux",
+      "platform_machine": "aarch64"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "repository": {
+    "app": [
+      {
+        "version": "1.0.0",
+        "dependencies": [
+          {"name": "left", "specifier": ""},
+          {"name": "right", "specifier": ""}
+        ]
+      }
+    ],
+    "left": [
+      {"version": "1.0", "dependencies": [{"name": "core", "specifier": "==1.0"}]}
+    ],
+    "right": [
+      {"version": "1.0", "dependencies": [{"name": "core", "specifier": "==2.0"}]}
+    ],
+    "core": [
+      {"version": "1.0"},
+      {"version": "2.0"}
+    ]
+  },
+  "root": "app",
+  "specifier": "",
+  "target_environment": {
+    "python_version": "3.11",
+    "sys_platform": "linux",
+    "platform_machine": "x86_64"
+  }
+}
