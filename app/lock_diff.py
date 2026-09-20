@@ -17,7 +17,11 @@ PEP 440 等价的版本（``1.0`` 与 ``1.0.0``）不产生变化项。每个变
 在某一侧不可达的变化项（added/removed）该侧路径为空数组 ``[]``。
 
 四类变化各自只取决于快照、目标环境与两份锁定清单，列表均按规范化包名
-排序；结果与输入（包键 / 候选列表 / 锁键）顺序无关。
+排序；结果与输入（包键 / 候选列表 / 锁键）顺序无关。变化项按既有顺序
+（added → removed → upgraded/downgraded，各按包名）逐个查询最短路径，
+某条查询的条数超过固定预算（app.paths.PATH_COUNT_LIMIT）时抛
+:exc:`app.paths.PathCountLimit`（命中首个超限项），由路由层映射为
+409 ``status=limit``，不构造任何路径列表。
 """
 
 from __future__ import annotations
@@ -40,7 +44,9 @@ def diff_locks(
     入参为同一份仓库快照与同一目标环境下解析出的两份锁（版本为 PEP 440
     Version）。返回 ``{"added", "removed", "upgraded", "downgraded"}``
     四个列表，各列表按规范化包名排序；每项含名称、前后版本与前后侧的
-    全部最短根路径（不可达一侧为 ``[]``）。
+    全部最短根路径（不可达一侧为 ``[]``）。某条最短路径查询超过固定
+    条数预算时抛 :exc:`app.paths.PathCountLimit`（按 added → removed →
+    upgraded/downgraded、各按包名的既有顺序命中首个超限项）。
     """
     before_graph = build_locked_graph(
         repo, root_name=root_name, current_lock=before_lock

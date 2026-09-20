@@ -14,7 +14,8 @@ PEP 503（包名规范化）与 **PEP 508（环境标记 marker）**，通过带
 版本从根包遍历已激活依赖，报告缺失、版本不可用、约束不满足与多余的包。
 `/dependency-paths` 在审计通过的锁定清单上**解释目标包为何出现**：按锁定
 版本与目标环境激活的依赖建图，返回从根包到目标包的全部最短包路径
-（菱形依赖保留等长路径，依赖环不重复节点、不会无限遍历）。
+（菱形依赖保留等长路径，依赖环不重复节点、不会无限遍历）；最短路径条数
+超过固定预算 **1000** 时返回 **409 / `status:"limit"`**，不构造路径列表。
 `/install-plan` 同样在审计通过的锁定清单上**规划并行安装顺序**：只对根
 可达包按已激活依赖建图，把**强连通分量压缩为 DAG**，输出**依赖优先的
 并行安装批次**——同一批内的包互不依赖可并行安装，循环依赖的包收缩为
@@ -28,13 +29,17 @@ PEP 503（包名规范化）与 **PEP 508（环境标记 marker）**，通过带
 版本 `metadata.license` 的 **SPDX `AND`/`OR`/括号表达式**，按请求的
 `allow` / `deny` 标识集合做**三态判定**（允许 / 拒绝 / 未知），返回按包名
 排序的 `violations` 与 `unknowns`，每项附根包到该包的**全部最短路径**；
+某命中包的最短路径条数超过固定预算 **1000** 时整体返回
+**409 / `status:"limit"`**（按包名顺序命中首个超限项）；
 非法 SPDX 表达式或 allow/deny 规则重叠返回 422。
 `/lock-diff` 在**同一份仓库快照与同一目标环境**下提交 `before_lock` 与
 `after_lock` 两份锁定清单：两份锁**各自独立复用 `/audit-lock` 的同一套
 规则**校验，任一无效即整体 **409** 并分别标注 before/after 的审计问题；
 均有效时**只比较根可达包**，按规范化包名输出 `added` / `removed` /
 `upgraded` / `downgraded`（版本方向按 PEP 440 判断），每个变化项同时
-给出其在前后依赖图中的**全部最短根路径**（不存在的一侧为空数组）。
+给出其在前后依赖图中的**全部最短根路径**（不存在的一侧为空数组）；
+某变化项的最短路径条数超过固定预算 **1000** 时整体返回
+**409 / `status:"limit"`**（按既有包名顺序命中首个超限项）。
 `/explain-version` 做**反事实版本解释**：沿用 `/resolve` 的仓库、根约束
 与目标环境，先按原规则求出**基准锁**（目标包不可达返回 422），再把
 `target_package` 强制钉在 `target_version` 上整体重解——可行时返回新锁
@@ -949,6 +954,11 @@ curl -s -X POST http://localhost:8000/audit-lock \
      更长的路径不返回；
    - **依赖环**（含自环）安全：每个包只展开一次，BFS 只记录最短距离上的
      前驱，路径内不重复节点，也不会无限遍历；
+   - **路径条数预算（固定 1000 条）**：分层菱形下最短路径条数随层数
+     指数增长，逐一构造会拖垮进程。BFS 建立最短前驱图后**先按层做饱和
+     计数**（只累加条数、不构造路径），条数超过 1000 即饱和为 1001 并
+     返回 **409 / `status:"limit"`**，**不构造路径列表**；未超限时才
+     重建并返回全部最短路径；
    - 目标即根包时返回唯一的单节点路径 `[根包]`；
    - 目标不在锁定清单或从根包不可达时返回 `"reachable": false` 与
      `"paths": []`（在有效锁上，锁中包都从根可达，因此不可达通常意味着
@@ -998,12 +1008,25 @@ curl -s -X POST http://localhost:8000/dependency-paths \
 }
 ```
 
+最短路径条数超过固定预算（1000 条）时返回 **409**，不构造路径列表
+（`used` 为饱和计数，恒为 `limit + 1`）：
+
+```json
+{
+  "status": "limit",
+  "message": "根包到目标包 'shared-util' 的最短路径条数超过预算：饱和计数 1001，超过上限 1000；未构造路径列表",
+  "target": "shared-util",
+  "used": 1001,
+  "limit": 1000
+}
+```
+
 `/dependency-paths` 的状态码：
 
 | 状态码 | 含义 |
 | --- | --- |
 | `200` | 锁有效，路径查询完成（`reachable` 为 `true` 或 `false` 都是 200） |
-| `409` | 锁定清单未通过审计：`status: "invalid_lock"`，`issues` 与 `/audit-lock` 的输出一致（确定性排序），不执行路径查询 |
+| `409` | 锁定清单未通过审计：`status: "invalid_lock"`，`issues` 与 `/audit-lock` 的输出一致（确定性排序），不执行路径查询；或最短路径条数超过固定预算 1000：`status: "limit"`，含 `target` / `used`（恒为 1001）/ `limit`，未构造路径列表 |
 | `422` | 请求/快照非法（同 `/resolve`），或 `current_lock` 含非法 PEP 440 版本、同一规范化包名对应多个不同版本、`target` 名称非法 |
 
 ### `POST /install-plan`
@@ -1274,7 +1297,7 @@ curl -s -X POST http://localhost:8000/sbom \
 | `root` | 规范化（PEP 503）后的根包名 |
 | `violations` | 判定为**拒绝**的包列表，**按规范化包名排序**；允许的包不出现 |
 | `unknowns` | 判定为**未知**的包列表（含未提供许可证的包），**按规范化包名排序** |
-| `violations[]` / `unknowns[]` | 每项为 `{"name", "license", "paths"}`：`name` 为规范化包名；`license` 为该包锁定版本的原始 SPDX 表达式文本（未提供时为 `null`）；`paths` 为根包到该包的**全部最短包路径**（与 `/dependency-paths` 同语义：含首尾、菱形等长路径全保留、环安全、字典序确定性排序；根包自身为单节点路径 `[root]`） |
+| `violations[]` / `unknowns[]` | 每项为 `{"name", "license", "paths"}`：`name` 为规范化包名；`license` 为该包锁定版本的原始 SPDX 表达式文本（未提供时为 `null`）；`paths` 为根包到该包的**全部最短包路径**（与 `/dependency-paths` 同语义：含首尾、菱形等长路径全保留、环安全、字典序确定性排序；根包自身为单节点路径 `[root]`）。命中包按包名顺序逐个查询路径，某条查询的条数超过固定预算 1000 时整体返回 **409 / `status:"limit"`**（命中首个超限项），不构造任何路径列表 |
 
 ```bash
 curl -s -X POST http://localhost:8000/license-policy \
@@ -1345,7 +1368,7 @@ curl -s -X POST http://localhost:8000/license-policy \
 | 状态码 | 含义 |
 | --- | --- |
 | `200` | 锁有效，策略判定完成（存在违规或未知项仍是 200；`violations` / `unknowns` 同时为空表示全部允许） |
-| `409` | 锁定清单未通过审计：`status: "invalid_lock"`，`issues` 与 `/audit-lock` 的输出一致（确定性排序），不解析许可证、不做判定 |
+| `409` | 锁定清单未通过审计：`status: "invalid_lock"`，`issues` 与 `/audit-lock` 的输出一致（确定性排序），不解析许可证、不做判定；或某命中包的最短路径条数超过固定预算 1000：`status: "limit"`，含 `target`（按包名顺序命中的首个超限包）/ `used`（恒为 1001）/ `limit`，未构造路径列表 |
 | `422` | 请求/快照非法（同 `/resolve`），或 `current_lock` 含非法 PEP 440 版本、某可达包锁定版本的 `metadata.license` 不是合法 SPDX `AND`/`OR`/括号表达式（含 `WITH`、`AND`/`OR` 任一侧缺少空白分隔，如 `MIT OR(Apache-2.0)`、`(MIT)AND(Apache-2.0)`）、`allow`/`deny` 项不是单个合法 SPDX 标识、`allow` 与 `deny` 存在重叠标识 |
 
 ### `POST /lock-diff`
@@ -1392,7 +1415,7 @@ curl -s -X POST http://localhost:8000/license-policy \
 | `added` / `removed` / `upgraded` / `downgraded` | 四类变化列表，各自**按规范化包名排序**；无变化时为 `[]` |
 | 每类列表项 `name` | PEP 503 规范化包名 |
 | `before_version` / `after_version` | 前后锁中的 PEP 440 版本字符串；added/removed 时缺失一侧为 `null` |
-| `before_paths` / `after_paths` | 该包在**前 / 后依赖图**中从根包出发的**全部最短包路径**（与 `/dependency-paths` 同语义：含首尾、菱形等长路径全保留、环安全、字典序确定性排序）；该包在对应一侧**不存在时为空数组 `[]`** |
+| `before_paths` / `after_paths` | 该包在**前 / 后依赖图**中从根包出发的**全部最短包路径**（与 `/dependency-paths` 同语义：含首尾、菱形等长路径全保留、环安全、字典序确定性排序）；该包在对应一侧**不存在时为空数组 `[]`**。变化项按 added → removed → upgraded/downgraded、各按包名的既有顺序逐个查询路径，某条查询的条数超过固定预算 1000 时整体返回 **409 / `status:"limit"`**（命中首个超限项），不构造任何路径列表 |
 
 ```bash
 curl -s -X POST http://localhost:8000/lock-diff \
@@ -1514,7 +1537,7 @@ curl -s -X POST http://localhost:8000/lock-diff \
 | 状态码 | 含义 |
 | --- | --- |
 | `200` | 两份锁均通过审计，差异比较完成（四类变化全为空表示根可达集与版本完全一致） |
-| `409` | `before_lock` / `after_lock` 任一未通过审计：`status: "invalid_lock"`，`before` / `after` 分别携带与 `/audit-lock` 一致的确定性排序问题，不执行比较 |
+| `409` | `before_lock` / `after_lock` 任一未通过审计：`status: "invalid_lock"`，`before` / `after` 分别携带与 `/audit-lock` 一致的确定性排序问题，不执行比较；或某变化项的最短路径条数超过固定预算 1000：`status: "limit"`，含 `target`（按 added → removed → upgraded/downgraded、各按包名的既有顺序命中的首个超限包）/ `used`（恒为 1001）/ `limit`，未构造路径列表 |
 | `422` | 请求/快照非法（同 `/resolve`），或 `before_lock` / `after_lock` 含非法 PEP 440 版本、同一规范化包名对应多个不同版本 |
 
 ### `POST /explain-version`
@@ -1684,7 +1707,9 @@ curl -s -X POST http://localhost:8000/explain-version \
     返回 409 且不查询；锁有效时按锁定版本展开已激活依赖建图，BFS 返回根包
     到目标包的全部最短包路径：菱形等长路径全保留，环不重复节点、不会无限
     遍历，路径按字典序确定性排序；目标为根包返回单节点路径，不可达返回
-    `reachable: false` 与空路径。
+    `reachable: false` 与空路径。最短路径条数受固定预算 1000 约束：BFS
+    建立最短前驱图后先按层做饱和计数，条数超限（饱和为 1001）即返回
+    409 `status:"limit"`，不构造路径列表。
 12. **安装计划（`/install-plan`）**：先复用第 10 条的审计，锁无效即
     返回 409 且不生成批次；锁有效时只对根可达包按锁定版本的已激活依赖
     建图（与第 11 条同一张图，无版本选择），用 Kosaraju 算法求强连通
@@ -1724,8 +1749,10 @@ curl -s -X POST http://localhost:8000/explain-version \
     `(MIT)AND(Apache-2.0)` 等紧贴写法稳定报 422 并在错误信息中定位违规
     运算符与位置；标识词中的 AND/OR 字母片段（如 `ANDOR`）不被拆分。
     `violations` 与 `unknowns` 各自按包名排序，每项复用第 11 条的最短
-    路径算法附根包到该包的全部最短路径；非法 SPDX 表达式（含 `WITH`、
-    运算符缺空白）、allow/deny 非法标识或两集合重叠返回 422，输出确定。
+    路径算法附根包到该包的全部最短路径（同受固定条数预算 1000 约束：
+    命中包按包名顺序逐个查询，首个超限项即整体返回 409 `status:"limit"`）；
+    非法 SPDX 表达式（含 `WITH`、运算符缺空白）、allow/deny 非法标识或
+    两集合重叠返回 422，输出确定。
 16. **锁差异比较（`/lock-diff`）**：同一份快照与目标环境下提交
     before_lock / after_lock，两份锁**各自独立**复用第 10 条的审计
     （即使一份已无效仍审计另一份），任一无效即整体 409 且分别标注
@@ -1733,8 +1760,11 @@ curl -s -X POST http://localhost:8000/explain-version \
     图上只比较**根可达包**：after 独有为 added、before 独有为 removed、
     两侧均有则按 PEP 440 版本方向分为 upgraded / downgraded（等价版本
     不产生变化项）；每个变化项分别复用第 11 条的最短路径算法给出其在
-    前后图中的全部最短根路径，不存在的一侧为空数组；四类列表各按包名
-    排序、路径按字典序排序，交换提交位置结果对称，与输入顺序无关。
+    前后图中的全部最短根路径（同受固定条数预算 1000 约束：变化项按
+    added → removed → upgraded/downgraded、各按包名的既有顺序逐个查询，
+    首个超限项即整体返回 409 `status:"limit"`），不存在的一侧为空数组；
+    四类列表各按包名排序、路径按字典序排序，交换提交位置结果对称，
+    与输入顺序无关。
 17. **反事实版本解释（`/explain-version`）**：先按第 2～8 条的原规则求出
     基准锁定清单（基准无解即返回该次求解的 409）；目标包不在基准锁中
     （从根包不可达）返回 422。随后其余规则不变，仅以一条与根需求并列的
@@ -1769,6 +1799,13 @@ curl -s -X POST http://localhost:8000/explain-version \
   上限）；非法配置在启动时失败。环境按 `id` 稳定顺序执行，输入重排不改变
   截断位置与响应。详见上文 `/resolve-matrix` 的“请求级求解预算”。
 - **依赖链深度上限**（默认 5,000 层）：超出同样以 `limit` 报出，而不是进程栈溢出。
+- **最短路径条数预算**（`/dependency-paths`、`/license-policy`、`/lock-diff`
+  共用，固定 1,000 条，不随配置变化）：分层菱形依赖下根到目标的最短路径
+  条数随层数指数增长，逐一构造路径列表会拖垮进程。BFS 建立最短前驱图后
+  先按层做**饱和计数**（只累加条数、不构造路径），条数超过预算即饱和为
+  1,001 并返回 `409 / status:"limit"`（含目标包、`used: 1001`、
+  `limit: 1000`），不构造路径列表；一次请求涉及多个目标时按既有包名顺序
+  稳定命中首个超限项。未超限的查询行为完全不变（全部最短路径照常返回）。
 
 ## 四、项目结构
 
@@ -1778,7 +1815,7 @@ app/
   config.py         # 环境变量配置（MATRIX_ATTEMPT_LIMIT 请求级共享求解预算，启动时校验）
   resolver.py       # 回溯求解器（候选排序 / MRV / 来源链重建 / 跨环境共享尝试预算）
   audit.py          # 锁定清单审计（按锁版本遍历 / 环中累计入边 / 四类问题）
-  paths.py          # 锁定依赖图建图与根包到目标包的全部最短路径（菱形/环安全）
+  paths.py          # 锁定依赖图建图与根包到目标包的全部最短路径（菱形/环安全，固定条数预算 1000 + 按层饱和计数）
   install_plan.py   # 有效锁图 SCC 压缩为 DAG 与依赖优先并行安装批次（循环分量原子项）
   sbom.py           # 沿已激活依赖图导出确定性 JSON SBOM（PURL / 元数据 / 缺失 warnings）
   spdx.py           # SPDX 许可证表达式词法/递归下降解析与 allow/deny 三态求值
