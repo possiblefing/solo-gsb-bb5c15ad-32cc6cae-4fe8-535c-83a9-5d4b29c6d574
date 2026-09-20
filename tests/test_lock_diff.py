@@ -4,8 +4,9 @@
 无效时问题都返回）、added/removed/upgraded/downgraded 分类、PEP 440
 版本方向（1.0 与 1.0.0 等价不产生变化）、每个变化项在前后图中的全部
 最短根路径（菱形等长路径、不存在一侧为空数组）、根包自身升降级、
-marker 激活语义、PEP 503 规范化名，以及与输入顺序无关的确定性和
-422 校验。
+marker 激活语义、PEP 503 规范化名、最短路径条数固定预算（1000 条，
+超限 409 status=limit 且按既有求值顺序命中首个超限项），以及与输入
+顺序无关的确定性和 422 校验。
 """
 
 from __future__ import annotations
@@ -427,3 +428,77 @@ def test_existing_endpoints_still_reject_lock_diff_fields():
         "after_lock": {"app": "1.0"},
     })
     assert r.status_code == 422
+
+
+# --------------------------------------------------------------------- #
+# 8. 最短路径条数固定预算（1000）：变化项路径超限 -> 409 status=limit
+# --------------------------------------------------------------------- #
+def layered_diamond(widths, sink="sink"):
+    """app 1.0 -> 逐层全连接的菱形链 -> sink；最短路径数 = 各层宽度之积。
+
+    快照中 app 另有一个无依赖的 0.5 版本，便于构造合法的 before_lock。
+    """
+    layers = [[f"l{k}-{i}" for i in range(w)] for k, w in enumerate(widths, 1)]
+    repo = {"app": [c("0.5"), c("1.0", [d(n) for n in layers[0]])]}
+    lock = {"app": "1.0", sink: "1.0"}
+    for k, layer in enumerate(layers, 1):
+        nxt = layers[k] if k < len(layers) else [sink]
+        for name in layer:
+            repo[name] = [c("1.0", [d(n) for n in nxt])]
+            lock[name] = "1.0"
+    repo[sink] = [c("1.0")]
+    return repo, lock
+
+
+def test_after_side_paths_over_budget_returns_409_limit():
+    """after 图中 added 包经 2^10 = 1024 条最短路径引入：409。"""
+    repo, after_lock = layered_diamond([2] * 10)
+    r = diff(repo, {"app": "0.5"}, after_lock)
+    assert r.status_code == 409, r.text
+    body = r.json()
+    assert body["status"] == "limit"
+    assert body["target"] == "sink"
+    assert body["used"] == 1001
+    assert body["limit"] == 1000
+    for key in ("added", "removed", "upgraded", "downgraded"):
+        assert key not in body
+
+
+def test_before_side_paths_over_budget_returns_409_limit():
+    """before 图中 removed 包的最短路径超预算：同样 409 status=limit。"""
+    repo, before_lock = layered_diamond([2] * 10)
+    r = diff(repo, before_lock, {"app": "0.5"})
+    assert r.status_code == 409, r.text
+    body = r.json()
+    assert body["status"] == "limit"
+    assert body["target"] == "sink"
+    assert body["used"] == 1001
+    assert body["limit"] == 1000
+
+
+def test_over_budget_reports_first_target_in_evaluation_order():
+    """多个变化项都超限时，按既有求值顺序（added 按包名升序）命中首个。"""
+    repo, after_lock = layered_diamond([2] * 10, sink="aaa-sink")
+    repo["zzz-sink"] = [c("1.0")]
+    after_lock["zzz-sink"] = "1.0"
+    for name in ("l10-0", "l10-1"):
+        repo[name][0]["dependencies"].append(d("zzz-sink"))
+    # 两个 sink 都是 added、各有 1024 条最短路径；aaa-sink 包名序在前。
+    r = diff(repo, {"app": "0.5"}, after_lock)
+    assert r.status_code == 409, r.text
+    body = r.json()
+    assert body["status"] == "limit"
+    assert body["target"] == "aaa-sink"
+    assert body["used"] == 1001
+    assert body["limit"] == 1000
+
+
+def test_paths_exactly_at_budget_still_compared_in_full():
+    """2*2*2*5*5*5 = 1000 条，恰在预算内：added 项附全部路径且排序不变。"""
+    repo, after_lock = layered_diamond([2, 2, 2, 5, 5, 5])
+    body = diff_ok(repo, {"app": "0.5"}, after_lock)
+    entry = next(e for e in body["added"] if e["name"] == "sink")
+    assert entry["before_version"] is None
+    assert entry["before_paths"] == []
+    assert len(entry["after_paths"]) == 1000
+    assert entry["after_paths"] == sorted(entry["after_paths"])

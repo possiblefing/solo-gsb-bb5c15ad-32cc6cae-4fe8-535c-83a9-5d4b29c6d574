@@ -3,9 +3,10 @@
 覆盖：先审计后判定的 409 短路（与 /audit-lock 的 issues 逐字节一致）、
 原子与 AND/OR/括号表达式的三态判定、未提供 license 归为 unknown、
 按包名排序、根包参与判定、菱形全部最短路径、环安全、marker 激活、
-锁定版本取元数据、PEP 503 规范化、确定性排序，以及 422（非法 SPDX、
-allow/deny 重叠或非法标识、非法快照/锁/根包/多余字段）与既有接口
-对 allow/deny 字段的兼容性。
+锁定版本取元数据、PEP 503 规范化、确定性排序、最短路径条数固定预算
+（1000 条，超限 409 status=limit 且按包名顺序命中首个超限项），以及
+422（非法 SPDX、allow/deny 重叠或非法标识、非法快照/锁/根包/多余
+字段）与既有接口对 allow/deny 字段的兼容性。
 """
 
 from __future__ import annotations
@@ -503,3 +504,62 @@ def test_existing_endpoints_reject_allow_deny_fields():
             "allow": ["MIT"],
         })
         assert r.status_code == 422, path
+
+
+# --------------------------------------------------------------------- #
+# 9. 最短路径条数固定预算（1000）：命中包路径超限 -> 409 status=limit
+# --------------------------------------------------------------------- #
+def layered_diamond(widths, sink="sink"):
+    """app -> 逐层全连接的菱形链 -> sink；最短路径数 = 各层宽度之积。"""
+    layers = [[f"l{k}-{i}" for i in range(w)] for k, w in enumerate(widths, 1)]
+    repo = {"app": [c("1.0", [d(n) for n in layers[0]])]}
+    lock = {"app": "1.0", sink: "1.0"}
+    for k, layer in enumerate(layers, 1):
+        nxt = layers[k] if k < len(layers) else [sink]
+        for name in layer:
+            repo[name] = [c("1.0", [d(n) for n in nxt])]
+            lock[name] = "1.0"
+    repo[sink] = [c("1.0")]
+    return repo, lock
+
+
+def test_violation_paths_over_budget_returns_409_limit():
+    """违规包经 2^10 = 1024 条最短路径引入：409，不构造路径列表。"""
+    repo, lock = layered_diamond([2] * 10, sink="gpl-sink")
+    repo["gpl-sink"] = [c("1.0", license_="GPL-3.0-only")]
+    r = policy(repo, lock)
+    assert r.status_code == 409, r.text
+    body = r.json()
+    assert body["status"] == "limit"
+    assert body["target"] == "gpl-sink"
+    assert body["used"] == 1001
+    assert body["limit"] == 1000
+    assert "violations" not in body and "unknowns" not in body
+
+
+def test_over_budget_reports_first_target_in_name_order():
+    """多个目标都超限时，按包名顺序稳定命中首个超限项。"""
+    repo, lock = layered_diamond([2] * 10, sink="aaa-sink")
+    repo["zzz-sink"] = [c("1.0")]
+    lock["zzz-sink"] = "1.0"
+    for name in ("l10-0", "l10-1"):
+        repo[name][0]["dependencies"].append(d("zzz-sink"))
+    # 两个 sink 都未提供许可证（unknown）、各有 1024 条最短路径；
+    # 判定按包名升序进行，aaa-sink 先超限。
+    r = policy(repo, lock)
+    assert r.status_code == 409, r.text
+    body = r.json()
+    assert body["status"] == "limit"
+    assert body["target"] == "aaa-sink"
+    assert body["used"] == 1001
+    assert body["limit"] == 1000
+
+
+def test_paths_exactly_at_budget_still_returned_in_full():
+    """2*2*2*5*5*5 = 1000 条，恰在预算内：违规项附全部路径且排序不变。"""
+    repo, lock = layered_diamond([2, 2, 2, 5, 5, 5], sink="gpl-sink")
+    repo["gpl-sink"] = [c("1.0", license_="GPL-3.0-only")]
+    body = report(repo, lock)
+    entry = next(e for e in body["violations"] if e["name"] == "gpl-sink")
+    assert len(entry["paths"]) == 1000
+    assert entry["paths"] == sorted(entry["paths"])

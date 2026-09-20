@@ -19,7 +19,10 @@ extraneous）。因此与 :mod:`app.sbom` 一样，这里不做任何版本选�
 
 两个输出列表各自只取决于快照、目标环境、锁定清单与策略集合，均按
 规范化包名排序；每条附 ``paths``（根包到该包的全部最短路径，字典序
-排序，语义与 /dependency-paths 一致）。
+排序，语义与 /dependency-paths 一致）。任一命中包的最短路径条数超过
+固定预算（``app.paths.PATH_COUNT_LIMIT``，1000 条）时不构造路径列表，
+抛 :class:`app.paths.PathCountLimit`——判定按包名升序进行，故多个
+命中包超限时稳定命中包名最小的首个超限项（API 层映射为 409）。
 """
 
 from __future__ import annotations
@@ -55,6 +58,8 @@ def evaluate_license_policy(
     （节点集恰为锁中全部包）。返回
     ``{"violations": [...], "unknowns": [...]}``，两项均按包名排序；
     包的 SPDX 表达式非法时抛 LicenseExpressionError（定位到包与版本）。
+    命中包的最短路径条数超固定预算时抛 PathCountLimit（按包名升序判定，
+    首个超限项即抛出）。
     """
     violations: list[dict] = []
     unknowns: list[dict] = []

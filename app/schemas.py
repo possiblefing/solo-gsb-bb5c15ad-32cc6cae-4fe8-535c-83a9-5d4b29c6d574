@@ -732,6 +732,29 @@ class InvalidLockResponse(BaseModel):
     )
 
 
+class PathLimitResponse(BaseModel):
+    """最短路径条数超过固定预算（1000 条）：409，未构造路径列表。
+
+    /dependency-paths、/license-policy、/lock-diff 共用；多目标接口按
+    既有包名顺序命中首个超限目标。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    status: Literal["limit"]
+    message: str
+    target: str = Field(
+        ..., description="最短路径计数超限的目标包名（PEP 503 规范化）。"
+    )
+    used: int = Field(
+        ...,
+        description="饱和计数结果：计数在 limit + 1 处封顶，故超限时恒为 limit + 1。",
+    )
+    limit: int = Field(
+        ..., description="单次最短路径查询的固定路径条数预算（1000）。"
+    )
+
+
 # --------------------------------------------------------------------- #
 # POST /install-plan 响应
 # --------------------------------------------------------------------- #

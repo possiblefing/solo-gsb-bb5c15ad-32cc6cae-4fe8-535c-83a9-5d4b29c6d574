@@ -2,14 +2,17 @@
 
 覆盖：先审计后查询的 409 短路、单节点根路径、不可达/不存在目标、
 菱形等长路径保留、环安全不重复节点、自环、marker 激活、PEP 503
-规范化名、路径与节点确定性排序，以及 422 与既有接口兼容性。
+规范化名、路径与节点确定性排序、最短路径条数固定预算（1000 条，
+超限 409 status=limit 且不构造路径列表），以及 422 与既有接口兼容性。
 """
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.paths import PATH_COUNT_LIMIT, PathCountLimit, shortest_paths
 
 client = TestClient(app)
 
@@ -390,3 +393,116 @@ def test_audit_lock_still_rejects_target_field():
         "target": "app",
     })
     assert r.status_code == 422
+
+
+# --------------------------------------------------------------------- #
+# 8. 最短路径条数固定预算（1000）：分层菱形图的指数级路径被饱和计数拦下
+# --------------------------------------------------------------------- #
+def layered_diamond(widths, sink="sink"):
+    """app -> 逐层全连接的菱形链 -> sink；最短路径数 = 各层宽度之积。"""
+    layers = [[f"l{k}-{i}" for i in range(w)] for k, w in enumerate(widths, 1)]
+    repo = {"app": [c("1.0", [d(n) for n in layers[0]])]}
+    lock = {"app": "1.0", sink: "1.0"}
+    for k, layer in enumerate(layers, 1):
+        nxt = layers[k] if k < len(layers) else [sink]
+        for name in layer:
+            repo[name] = [c("1.0", [d(n) for n in nxt])]
+            lock[name] = "1.0"
+    repo[sink] = [c("1.0")]
+    return repo, lock
+
+
+def test_path_count_over_budget_returns_409_limit():
+    """2^10 = 1024 条最短路径，超过固定预算 1000：409，不构造路径列表。"""
+    repo, lock = layered_diamond([2] * 10)
+    r = query(repo, lock, "sink")
+    assert r.status_code == 409, r.text
+    body = r.json()
+    assert body["status"] == "limit"
+    assert body["target"] == "sink"
+    assert body["used"] == 1001
+    assert body["limit"] == 1000
+    assert "paths" not in body and "reachable" not in body
+
+
+def test_path_count_far_over_budget_still_fast_409():
+    """2^40 条路径的图：饱和计数在构造路径前拦截，进程不被拖垮。"""
+    repo, lock = layered_diamond([2] * 40)
+    r = query(repo, lock, "sink")
+    assert r.status_code == 409, r.text
+    body = r.json()
+    assert body["status"] == "limit"
+    assert body["used"] == 1001
+    assert body["limit"] == 1000
+
+
+def test_path_count_exactly_at_budget_returns_all_paths():
+    """2*2*2*5*5*5 = 1000 条，恰在预算内：全部返回且排序不变。"""
+    repo, lock = layered_diamond([2, 2, 2, 5, 5, 5])
+    r = query(repo, lock, "sink")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["reachable"] is True
+    assert len(body["paths"]) == 1000
+    assert body["paths"] == sorted(body["paths"])
+    assert all(p[0] == "app" and p[-1] == "sink" for p in body["paths"])
+    for p in body["paths"]:
+        assert len(p) == len(set(p))
+
+
+def test_path_count_one_over_budget_returns_409():
+    """7*11*13 = 1001 条，恰超预算 1 条：同样 409，used 恰为 1001。"""
+    repo, lock = layered_diamond([7, 11, 13])
+    r = query(repo, lock, "sink")
+    assert r.status_code == 409, r.text
+    body = r.json()
+    assert body["status"] == "limit"
+    assert body["target"] == "sink"
+    assert body["used"] == 1001
+    assert body["limit"] == 1000
+
+
+def test_over_budget_graph_cheap_queries_unaffected():
+    """同一张超限图上，未超限的查询结果与语义完全不变。"""
+    repo, lock = layered_diamond([2] * 10)
+    # 中间层节点 l5-0 只有 2^4 = 16 条最短路径，照常返回。
+    r = query(repo, lock, "l5-0")
+    assert r.status_code == 200, r.text
+    assert len(r.json()["paths"]) == 16
+    # 不可达目标仍是 reachable=false（计数预算不参与）。
+    r = query(repo, lock, "ghost")
+    assert r.status_code == 200, r.text
+    assert r.json()["reachable"] is False
+    assert r.json()["paths"] == []
+    # 目标即根包仍是单节点路径。
+    assert paths(repo, lock, "app") == [["app"]]
+
+
+def test_shortest_paths_unit_budget_semantics():
+    """直接单测饱和计数：limit=3 时 4 条菱形路径触发 PathCountLimit。"""
+    graph = {
+        "app": ["a", "b"],
+        "a": ["x", "y"],
+        "b": ["x", "y"],
+        "x": ["t"],
+        "y": ["t"],
+        "t": [],
+    }
+    # app -> a/b -> x/y -> t：2*2 = 4 条等长最短路径。
+    assert shortest_paths(graph, "app", "t", limit=4) == [
+        ["app", "a", "x", "t"],
+        ["app", "a", "y", "t"],
+        ["app", "b", "x", "t"],
+        ["app", "b", "y", "t"],
+    ]
+    with pytest.raises(PathCountLimit) as exc_info:
+        shortest_paths(graph, "app", "t", limit=3)
+    exc = exc_info.value
+    assert exc.target == "t"
+    assert exc.limit == 3
+    assert exc.used == 4  # 饱和计数恒为 limit + 1
+
+
+def test_path_count_limit_constant_is_fixed_1000():
+    """预算是固定值 1000（不随环境变量变化）。"""
+    assert PATH_COUNT_LIMIT == 1000

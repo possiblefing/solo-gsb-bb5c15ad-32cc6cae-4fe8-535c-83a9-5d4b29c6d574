@@ -25,7 +25,8 @@
 * POST /dependency-paths
   先按 /audit-lock 规则校验 current_lock；无效返回 409 审计问题，
   有效则按锁定版本与目标环境已激活依赖建图，返回根包到目标包的
-  全部最短包路径（菱形保留等长路径，环安全、确定性排序）
+  全部最短包路径（菱形保留等长路径，环安全、确定性排序）；最短路径
+  条数超过固定预算 1000 时返回 409 status=limit，不构造路径列表
 * POST /install-plan
   先按 /audit-lock 规则校验 current_lock；无效返回 409 审计问题，
   有效则只对根可达包按已激活依赖建图，把强连通分量压缩为 DAG，
@@ -41,14 +42,18 @@
   先按 /audit-lock 规则校验 current_lock；无效返回 409 审计问题，
   有效则解析各可达包锁定版本 metadata.license 的 SPDX AND/OR/括号
   表达式，按请求的 allow/deny 标识集合做三态判定，返回按包名排序的
-  violations 与 unknowns（各附根包到该包的全部最短路径）；
+  violations 与 unknowns（各附根包到该包的全部最短路径；任一包的最短
+  路径条数超过固定预算 1000 时按包名顺序命中首个超限项，整体返回
+  409 status=limit，不构造路径列表）；
   非法 SPDX 表达式或 allow/deny 规则重叠返回 422
 * POST /lock-diff
   同一份仓库快照与目标环境下提交 before_lock、after_lock 两份锁定清单：
   各自独立复用 /audit-lock 规则校验，任一无效即整体 409 并分别标注
   before/after 的审计问题；均有效时只比较两份锁的根可达包，按规范化
   包名输出 added/removed/upgraded/downgraded（版本方向按 PEP 440），
-  每个变化项附其在前后依赖图中的全部最短根路径（不存在的一侧为空数组）
+  每个变化项附其在前后依赖图中的全部最短根路径（不存在的一侧为空数组；
+  任一变化项的最短路径条数超过固定预算 1000 时按既有求值顺序命中首个
+  超限项，整体返回 409 status=limit，不构造路径列表）
 * POST /explain-version
   沿用 /resolve 的仓库、根约束与目标环境，先按原规则求出基准锁定清单
   （目标包不在其中即不可达，返回 422），再把 target_package 钉在
@@ -74,7 +79,7 @@ from .lock_groups import (
     lock_group_id,
     select_lock_groups,
 )
-from .paths import build_locked_graph, shortest_paths
+from .paths import PathCountLimit, build_locked_graph, shortest_paths
 from .repository import (
     Repository,
     SnapshotError,
@@ -113,6 +118,7 @@ from .schemas import (
     ResolveMatrixResponse,
     MatrixLimitResponse,
     MatrixUnresolvedResponse,
+    PathLimitResponse,
     ResolveRequest,
     ResolveResponse,
     SbomRequest,
@@ -232,6 +238,24 @@ def _matrix_limit_payload(
         "environment": env_id,
         "used": budget.used,
         "limit": budget.limit,
+    }
+
+
+def _path_limit_payload(exc: PathCountLimit) -> dict:
+    """最短路径条数超过固定预算的 409 响应体。
+
+    /dependency-paths、/license-policy、/lock-diff 共用同一形态：
+    饱和计数在预算 +1 处封顶，故 used 恒为 limit + 1。
+    """
+    return {
+        "status": "limit",
+        "message": (
+            f"根包到目标包 {exc.target!r} 的最短路径条数超过固定预算："
+            f"饱和计数 {exc.used} 条，超过上限 {exc.limit}；未构造路径列表"
+        ),
+        "target": exc.target,
+        "used": exc.used,
+        "limit": exc.limit,
     }
 
 
@@ -741,7 +765,13 @@ def audit_lock_endpoint(request: AuditLockRequest):
     summary="解释目标包为何出现在锁定清单中：根包到目标包的全部最短路径",
     response_model=DependencyPathsResponse,
     responses={
-        409: {"model": InvalidLockResponse, "description": "锁定清单未通过审计"},
+        409: {
+            "model": InvalidLockResponse | PathLimitResponse,
+            "description": (
+                "锁定清单未通过审计（status=invalid_lock）；或最短路径条数"
+                "超过固定预算 1000（status=limit，未构造路径列表）"
+            ),
+        },
         422: {"model": InvalidSnapshotResponse, "description": "快照或 current_lock 非法"},
     },
 )
@@ -790,10 +820,14 @@ def dependency_paths_endpoint(request: DependencyPathsRequest):
         )
 
     # 有效锁：按锁定版本与目标环境激活的依赖建图（无版本选择）。
+    # 最短路径条数超过固定预算时不构造路径列表，返回 409 status=limit。
     graph = build_locked_graph(
         repo, root_name=root_canonical, current_lock=current_lock
     )
-    paths = shortest_paths(graph, root_canonical, target_canonical)
+    try:
+        paths = shortest_paths(graph, root_canonical, target_canonical)
+    except PathCountLimit as exc:
+        return JSONResponse(status_code=409, content=_path_limit_payload(exc))
     return {
         "status": "ok",
         "root": root_canonical,
@@ -939,7 +973,13 @@ def sbom_endpoint(request: SbomRequest):
     summary="在有效锁定清单上按 allow/deny 判定各可达包的 SPDX 许可证表达式",
     response_model=LicensePolicyResponse,
     responses={
-        409: {"model": InvalidLockResponse, "description": "锁定清单未通过审计"},
+        409: {
+            "model": InvalidLockResponse | PathLimitResponse,
+            "description": (
+                "锁定清单未通过审计（status=invalid_lock）；或某命中包的最短"
+                "路径条数超过固定预算 1000（status=limit，未构造路径列表）"
+            ),
+        },
         422: {
             "model": InvalidSnapshotResponse,
             "description": "快照/current_lock 非法、SPDX 表达式非法或 allow/deny 规则重叠",
@@ -990,7 +1030,8 @@ def license_policy_endpoint(request: LicensePolicyRequest):
         )
 
     # 规则集合（标识合法性、allow/deny 重叠）与许可证表达式均属于请求
-    # 语义校验：非法返回 422，输出不做任何判定。
+    # 语义校验：非法返回 422，输出不做任何判定。逐包最短路径查询超过固定
+    # 预算时按包名顺序命中首个超限项，整体返回 409 status=limit。
     try:
         allow_set, deny_set = parse_policy_sets(request.allow, request.deny)
         graph = build_locked_graph(
@@ -1009,6 +1050,8 @@ def license_policy_endpoint(request: LicensePolicyRequest):
             status_code=422,
             content={"status": "invalid_snapshot", "message": str(exc)},
         )
+    except PathCountLimit as exc:
+        return JSONResponse(status_code=409, content=_path_limit_payload(exc))
 
     return {"status": "ok", "root": root_canonical, **document}
 
@@ -1019,8 +1062,12 @@ def license_policy_endpoint(request: LicensePolicyRequest):
     response_model=LockDiffResponse,
     responses={
         409: {
-            "model": LockDiffInvalidResponse,
-            "description": "before_lock/after_lock 任一未通过审计：两侧问题分别标注",
+            "model": LockDiffInvalidResponse | PathLimitResponse,
+            "description": (
+                "before_lock/after_lock 任一未通过审计：两侧问题分别标注"
+                "（status=invalid_lock）；或某变化项的最短路径条数超过固定"
+                "预算 1000（status=limit，未构造路径列表）"
+            ),
         },
         422: {"model": InvalidSnapshotResponse, "description": "快照或任一锁非法"},
     },
@@ -1099,13 +1146,17 @@ def lock_diff_endpoint(request: LockDiffRequest):
         )
 
     # 两份锁均有效：只比较根可达包，版本方向按 PEP 440；每个变化项附
-    # 前后依赖图中的全部最短根路径（不存在的一侧为空数组）。
-    document = diff_locks(
-        repo,
-        root_name=root_canonical,
-        before_lock=before_lock,
-        after_lock=after_lock,
-    )
+    # 前后依赖图中的全部最短根路径（不存在的一侧为空数组）。任一变化项的
+    # 最短路径条数超过固定预算时不构造路径列表，整体返回 409 status=limit。
+    try:
+        document = diff_locks(
+            repo,
+            root_name=root_canonical,
+            before_lock=before_lock,
+            after_lock=after_lock,
+        )
+    except PathCountLimit as exc:
+        return JSONResponse(status_code=409, content=_path_limit_payload(exc))
     return {"status": "ok", "root": root_canonical, **document}
 
 

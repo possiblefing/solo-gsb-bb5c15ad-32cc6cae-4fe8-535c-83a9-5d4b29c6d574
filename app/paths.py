@@ -14,6 +14,12 @@ extraneous）。因此这里不做任何版本选择与约束核对，只按**�
 
 从根包到目标包返回**所有最短路径**（边数最少）；菱形依赖产生的等长路径
 全部保留。输出路径整体按字典序排序，路径内节点即访问次序。
+
+分层菱形图的最短路径条数随层数指数增长（k 层全连接菱形即 2^k 条），
+无限制地构造路径列表会拖垮进程。因此单次查询有**固定路径条数预算**
+``PATH_COUNT_LIMIT``（1000 条）：BFS 建立最短前驱图后先按层做**饱和
+计数**（计数到预算 +1 即封顶，不再精确），目标超限时不构造任何路径
+列表，抛 :class:`PathCountLimit`；预算内才按层重建全部路径。
 """
 
 from __future__ import annotations
@@ -24,6 +30,23 @@ from packaging.version import Version
 
 from .audit import _find_candidate
 from .repository import Repository
+
+# 单次最短路径查询的固定路径条数预算：超过即不构造路径列表（API 层 409）。
+PATH_COUNT_LIMIT = 1_000
+
+
+class PathCountLimit(RuntimeError):
+    """根包到目标包的最短路径条数超过固定预算。
+
+    饱和计数在预算 +1 处封顶，因此超限时 ``used`` 恒为 ``limit + 1``；
+    路径列表未被构造。``target`` 为触发超限的目标包（规范化名）。
+    """
+
+    def __init__(self, target: str, limit: int):
+        super().__init__(f"根包到 {target!r} 的最短路径条数超过预算 {limit}")
+        self.target = target
+        self.limit = limit
+        self.used = limit + 1
 
 
 def build_locked_graph(
@@ -57,13 +80,20 @@ def build_locked_graph(
 
 
 def shortest_paths(
-    graph: dict[str, list[str]], root: str, target: str
+    graph: dict[str, list[str]],
+    root: str,
+    target: str,
+    *,
+    limit: int = PATH_COUNT_LIMIT,
 ) -> list[list[str]]:
     """根包到目标包的所有最短路径；不可达（或目标不在图中）时返回空列表。
 
     无权 BFS 记录每个节点在最短距离上的全部前驱（菱形的等长路径由此全部
-    保留；环上回边距离更长，不会进入前驱表），再按深度自顶向下重建路径，
-    避免深链上的递归。最终路径按字典序排序，与输入顺序无关。
+    保留；环上回边距离更长，不会进入前驱表）。随后**先按层饱和计数**：
+    ``count[n]`` 为根到 n 的最短路径条数，累计超过 ``limit`` 即封顶为
+    ``limit + 1``；目标的计数超限时不构造任何路径列表，抛
+    :class:`PathCountLimit`。预算内才按深度自顶向下重建路径，避免深链
+    上的递归。最终路径按字典序排序，与输入顺序无关。
     """
     if target not in graph:
         return []
@@ -95,9 +125,31 @@ def shortest_paths(
     if target not in parents:
         return []
 
-    # 按层重建：suffixes[d] 为距目标 d 层上的全部后缀。
+    target_distance = distance[target]
+
+    # 按层饱和计数：count[n] 为根到 n 的最短路径条数（前驱恒在上一层，
+    # 逐层推进即可）；任何节点累计超过预算即封顶为 limit + 1，不再精确。
+    # 只计数、不构造路径，分层菱形图的指数级路径数在此被拦下。
+    by_depth: list[list[str]] = [[] for _ in range(target_distance + 1)]
+    for node, dist in distance.items():
+        if dist <= target_distance:
+            by_depth[dist].append(node)
+    count: dict[str, int] = {root: 1}
+    for depth in range(1, target_distance + 1):
+        for node in by_depth[depth]:
+            total = 0
+            for parent in parents[node]:
+                total += count[parent]
+                if total > limit:
+                    total = limit + 1  # 饱和：精确条数不再重要
+                    break
+            count[node] = total
+    if count[target] > limit:
+        raise PathCountLimit(target, limit)
+
+    # 预算内：按层重建（suffixes[d] 为距目标 d 层上的全部后缀）。
     suffixes: dict[int, list[list[str]]] = {0: [[target]]}
-    for depth in range(1, distance[target] + 1):
+    for depth in range(1, target_distance + 1):
         current: list[list[str]] = []
         for suffix in suffixes[depth - 1]:
             node = suffix[0]
@@ -105,5 +157,5 @@ def shortest_paths(
                 current.append([parent, *suffix])
         suffixes[depth] = current
 
-    paths = suffixes[distance[target]]
+    paths = suffixes[target_distance]
     return sorted(paths)
